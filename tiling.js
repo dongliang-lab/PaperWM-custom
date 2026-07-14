@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import Pango from "gi://Pango";
 import GDesktopEnums from 'gi://GDesktopEnums';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -369,6 +370,8 @@ export class Space extends Array {
         });
         this.windowPositionBar.hide(); // default on empty space
         Utils.actor_raise(this.windowPositionBar);
+
+        this.windowTitleLabels = [];
 
         this.showPositionBar && this.enableWindowPositionBar();
         this.showFocusModeIcon();
@@ -1752,6 +1755,9 @@ border-radius: ${borderWidth}px;
         let cols = this.length;
         if (cols <= 1) {
             this.windowPositionBar.hide();
+            // destroy title labels
+            this.windowTitleLabels.forEach(l => l.destroy());
+            this.windowTitleLabels = [];
             return;
         } else {
             this.windowPositionBar.show();
@@ -1766,6 +1772,55 @@ border-radius: ${borderWidth}px;
         // index of currently selected window
         let windex = this.indexOf(this.selectedWindow);
         this.windowPositionBar.x = windex * segments;
+
+        // update window title labels for each column
+        // remove excess labels
+        while (this.windowTitleLabels.length > cols) {
+            let label = this.windowTitleLabels.pop();
+            label.destroy();
+        }
+
+        for (let i = 0; i < cols; i++) {
+            let column = this[i];
+            let title = "";
+            if (column && column.length > 0) {
+                let mw = column[0];
+                let t = mw.get_title();
+                if (t) title = t;
+            }
+
+            let label;
+            if (i < this.windowTitleLabels.length) {
+                label = this.windowTitleLabels[i];
+            } else {
+                label = new St.Label();
+                label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+                label.y_align = Clutter.ActorAlign.CENTER;
+                this.windowPositionBarBackdrop.add_child(label);
+                this.windowTitleLabels.push(label);
+            }
+
+            label.text = title;
+            let segWidth = Math.max(segments - 8, 30);
+            label.style = "width: " + segWidth + "px; font-size: 13px; text-align: center;"
+                + (i === windex
+                    ? " color: white;"
+                    : " color: rgba(255,255,255,0.7);");
+            let panelH = Topbar.panelBox.height;
+            label.height = panelH;
+            let estTextH = 16;
+            label.y = Math.round((panelH - estTextH) / 2);
+            label.x = i * segments + 4;
+            label.reactive = true;
+            let colIndex = i;
+            label._clickHandler = label.connect("button-press-event", () => {
+                let col = this[colIndex];
+                if (col && col.length > 0) {
+                    this.activateWithFocus(col[0], false, false);
+                }
+                return Clutter.EVENT_STOP;
+            });
+        }
     }
 
     /**

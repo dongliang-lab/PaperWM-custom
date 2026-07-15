@@ -27,6 +27,8 @@ export let panelBox = Main.layoutManager.panelBox;
 export let menu, focusButton, openPositionButton;
 let openPrefs, screenSignals, signals, gsettings;
 let activeOpenWindowPositions;
+let windowTitleOverlay, windowTitleSpace;
+let windowTitleSegments = [];
 
 export function enable (extension) {
     activeOpenWindowPositions = [
@@ -61,6 +63,7 @@ export function enable (extension) {
 
     screenSignals = [];
     signals = new Utils.Signals();
+    _createWindowTitleOverlay();
 
     Main.panel.statusArea.activities.hide();
 
@@ -84,11 +87,18 @@ export function enable (extension) {
 
     screenSignals.push(
         workspaceManager.connect_after('workspace-switched',
-            (_workspaceManager, _from, to) => updateWorkspaceIndicator(to)));
+            (_workspaceManager, _from, to) => {
+                updateWorkspaceIndicator(to);
+                syncWindowTitleOverlay();
+            }));
 
-    signals.connect(Main.overview, 'showing', fixTopBar);
+    signals.connect(Main.overview, 'showing', () => {
+        fixTopBar();
+        windowTitleOverlay?.hide();
+    });
     signals.connect(Main.overview, 'hidden', () => {
         fixTopBar();
+        syncWindowTitleOverlay();
     });
 
     signals.connect(gsettings, 'changed::disable-topbar-styling', (_settings, _key) => {
@@ -104,6 +114,7 @@ export function enable (extension) {
         const spaces = Tiling.spaces;
         spaces.forEach(s => s.showPositionBarChanged());
         fixStyle();
+        syncWindowTitleOverlay();
     });
 
     signals.connect(gsettings, 'changed::show-workspace-indicator', (_settings, _key) => {
@@ -120,13 +131,48 @@ export function enable (extension) {
 
     signals.connect(panelBox, 'show', () => {
         fixTopBar();
+        syncWindowTitleOverlay();
     });
-    // signals.connect(panelBox, 'hide', () => {
-    //     fixTopBar();
-    // });
+    signals.connect(panelBox, 'hide', () => {
+        windowTitleOverlay?.hide();
+    });
+    signals.connect(panelBox, 'notify::allocation', () => {
+        syncWindowTitleOverlay();
+    });
+    signals.connect(Main.layoutManager, 'monitors-changed', () => {
+        syncWindowTitleOverlay();
+    });
 
     signals.connect(Main.panel, 'scroll-event', (_actor, event) => {
         topBarScrollAction(event);
+    });
+
+    signals.connect(global.stage, 'captured-event', (_actor, event) => {
+        if (event.type() !== Clutter.EventType.BUTTON_PRESS ||
+            event.get_button() !== Clutter.BUTTON_PRIMARY)
+            return Clutter.EVENT_PROPAGATE;
+
+        const space = windowTitleSpace;
+        const monitor = panelMonitor();
+        if (!windowTitleOverlay?.visible || !space || !monitor || space.length <= 1)
+            return Clutter.EVENT_PROPAGATE;
+
+        const [stageX, stageY] = event.get_coords();
+        if (!_actorContainsPoint(Main.panel, stageX, stageY) ||
+            _statusAreaContainsPoint(stageX, stageY))
+            return Clutter.EVENT_PROPAGATE;
+
+        const x = stageX - monitor.x;
+        if (x < 0 || x >= monitor.width)
+            return Clutter.EVENT_PROPAGATE;
+
+        const segmentWidth = monitor.width / space.length;
+        const column = space[Math.floor(x / segmentWidth)];
+        if (!column?.[0])
+            return Clutter.EVENT_PROPAGATE;
+
+        space.activateWithFocus(column[0], false, false);
+        return Clutter.EVENT_STOP;
     });
 
     /**
@@ -140,6 +186,12 @@ export function enable (extension) {
 export function disable() {
     signals.destroy();
     signals = null;
+    clearWindowTitleOverlay();
+    if (windowTitleOverlay) {
+        Main.layoutManager.removeChrome(windowTitleOverlay);
+        windowTitleOverlay.destroy();
+        windowTitleOverlay = null;
+    }
     focusButton.destroy();
     focusButton = null;
     openPositionButton.destroy();
@@ -155,6 +207,132 @@ export function disable() {
     screenSignals = [];
     openPrefs = null;
     gsettings = null;
+}
+
+function _createWindowTitleOverlay() {
+    windowTitleOverlay = new St.Widget({
+        name: 'paperwmWindowTitleOverlay',
+        reactive: false,
+        visible: false,
+        layout_manager: new Clutter.FixedLayout(),
+    });
+    Main.layoutManager.addChrome(windowTitleOverlay, {
+        trackFullscreen: true,
+    });
+    Main.layoutManager.uiGroup.set_child_below_sibling(windowTitleOverlay, panelBox);
+}
+
+function _actorContainsPoint(actor, stageX, stageY) {
+    if (!actor?.visible || !actor.mapped)
+        return false;
+
+    const [x, y] = actor.get_transformed_position();
+    const [width, height] = actor.get_transformed_size();
+    return stageX >= x && stageX < x + width &&
+        stageY >= y && stageY < y + height;
+}
+
+function _statusAreaContainsPoint(stageX, stageY) {
+    return Object.values(Main.panel.statusArea).some(indicator => {
+        const actor = typeof indicator?.get_transformed_position === 'function'
+            ? indicator
+            : indicator?.container;
+        return _actorContainsPoint(actor, stageX, stageY);
+    });
+}
+
+function _createWindowTitleSegment() {
+    const actor = new St.Widget({
+        reactive: false,
+        clip_to_allocation: true,
+        layout_manager: new Clutter.BinLayout(),
+    });
+    const label = new St.Label({
+        style_class: 'paperwm-window-title-label',
+        x_align: Clutter.ActorAlign.FILL,
+        y_align: Clutter.ActorAlign.CENTER,
+    });
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    actor.add_child(label);
+
+    const segment = { actor, label, metaWindow: null };
+    windowTitleOverlay.add_child(actor);
+    windowTitleSegments.push(segment);
+    return segment;
+}
+
+function _setWindowTitleSegmentWindow(segment, metaWindow) {
+    if (segment.metaWindow !== metaWindow) {
+        segment.metaWindow?.disconnectObject(segment.actor);
+        segment.metaWindow = metaWindow;
+        metaWindow?.connectObject('notify::title', () => {
+            segment.label.text = metaWindow.get_title() ?? '';
+        }, segment.actor);
+    }
+    segment.label.text = metaWindow?.get_title() ?? '';
+}
+
+function _destroyWindowTitleSegment(segment) {
+    segment.metaWindow?.disconnectObject(segment.actor);
+    segment.metaWindow = null;
+    segment.actor.destroy();
+}
+
+/**
+ * Updates the shared title overlay for the space displayed beneath the panel.
+ * @param {Tiling.Space} space
+ */
+export function syncWindowTitleOverlay(space = panelSpace()) {
+    if (!windowTitleOverlay)
+        return;
+
+    const monitor = panelMonitor();
+    const eligible = Boolean(
+        monitor &&
+        space?.hasTopBar &&
+        space.showPositionBar &&
+        space.length > 1
+    );
+    if (!eligible) {
+        clearWindowTitleOverlay();
+        windowTitleOverlay.hide();
+        return;
+    }
+
+    const segmentWidth = monitor.width / space.length;
+    const panelHeight = panelBox.height;
+    const selectedIndex = space.indexOf(space.selectedWindow);
+
+    windowTitleSpace = space;
+    windowTitleOverlay.set_position(monitor.x, monitor.y);
+    windowTitleOverlay.set_size(monitor.width, panelHeight);
+
+    while (windowTitleSegments.length > space.length)
+        _destroyWindowTitleSegment(windowTitleSegments.pop());
+
+    for (let i = 0; i < space.length; i++) {
+        const segment = windowTitleSegments[i] ?? _createWindowTitleSegment();
+        const width = Math.max(0, segmentWidth - 8);
+        segment.actor.set_position(Math.round(i * segmentWidth + 4), 0);
+        segment.actor.set_size(Math.floor(width), panelHeight);
+        segment.actor.visible = width > 0;
+        _setWindowTitleSegmentWindow(segment, space[i]?.[0] ?? null);
+        if (i === selectedIndex)
+            segment.label.add_style_pseudo_class('selected');
+        else
+            segment.label.remove_style_pseudo_class('selected');
+    }
+
+    const visible = panelBox.visible &&
+        !Main.overview.visible &&
+        !monitor.inFullscreen;
+    windowTitleOverlay.visible = visible;
+}
+
+export function clearWindowTitleOverlay() {
+    windowTitleSegments.forEach(_destroyWindowTitleSegment);
+    windowTitleSegments = [];
+    windowTitleSpace = null;
 }
 
 /**

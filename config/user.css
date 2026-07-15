@@ -81,4 +81,14 @@ DEFAULT STYLES ARE PROVIDED BELOW FOR REFERENCE:
     border-radius: 1px;
 }
 
+.paperwm-window-title-label {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 13px;
+    text-align: center;
+}
+
+.paperwm-window-title-label:selected {
+    color: white;
+}
+
 */

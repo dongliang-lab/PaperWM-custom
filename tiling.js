@@ -1,5 +1,5 @@
 import Clutter from 'gi://Clutter';
-import Pango from "gi://Pango";
+import Pango from 'gi://Pango';
 import GDesktopEnums from 'gi://GDesktopEnums';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -978,6 +978,8 @@ export class Space extends Array {
             this.targetX = workArea.x + Math.round((workArea.width - this.cloneContainer.width) / 2);
         }
         this.emit('window-added', metaWindow, index, row);
+        if (this._populated)
+            this.updateWindowPositionBar();
         return true;
     }
 
@@ -1029,6 +1031,8 @@ export class Space extends Array {
         }
 
         this.emit('window-removed', metaWindow, index, row);
+        if (this._populated)
+            this.updateWindowPositionBar();
         return true;
     }
 
@@ -1736,12 +1740,73 @@ border-radius: ${borderWidth}px;
             //     });
             Utils.actor_remove_child(this.actor, this.windowPositionBarBackdrop);
             Utils.actor_remove_child(this.actor, this.windowPositionBar);
+            this._destroyWindowTitleLabels();
+            if (Topbar.panelSpace() === this)
+                Topbar.syncWindowTitleOverlay(this);
         }
+    }
+
+    _createWindowTitleLabel() {
+        const actor = new St.Widget({
+            reactive: true,
+            clip_to_allocation: true,
+            layout_manager: new Clutter.BinLayout(),
+        });
+        const label = new St.Label({
+            style_class: 'paperwm-window-title-label',
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        actor.add_child(label);
+
+        const segment = {
+            actor,
+            label,
+            columnIndex: this.windowTitleLabels.length,
+            metaWindow: null,
+        };
+        actor.connect('button-press-event', () => {
+            const column = this[segment.columnIndex];
+            if (!column?.[0])
+                return Clutter.EVENT_PROPAGATE;
+
+            this.activateWithFocus(column[0], false, false);
+            return Clutter.EVENT_STOP;
+        });
+        this.windowPositionBarBackdrop.add_child(actor);
+        this.windowTitleLabels.push(segment);
+        return segment;
+    }
+
+    _setWindowTitleLabelWindow(segment, metaWindow) {
+        if (segment.metaWindow !== metaWindow) {
+            segment.metaWindow?.disconnectObject(segment.actor);
+            segment.metaWindow = metaWindow;
+            metaWindow?.connectObject('notify::title', () => {
+                segment.label.text = metaWindow.get_title() ?? '';
+            }, segment.actor);
+        }
+        segment.label.text = metaWindow?.get_title() ?? '';
+    }
+
+    _destroyWindowTitleLabel(segment) {
+        segment.metaWindow?.disconnectObject(segment.actor);
+        segment.metaWindow = null;
+        segment.actor.destroy();
+    }
+
+    _destroyWindowTitleLabels() {
+        this.windowTitleLabels.forEach(segment => this._destroyWindowTitleLabel(segment));
+        this.windowTitleLabels = [];
     }
 
     updateWindowPositionBar() {
         // if pref show-window-position-bar, exit
         if (!this.showPositionBar) {
+            this._destroyWindowTitleLabels();
+            if (Topbar.panelSpace() === this)
+                Topbar.syncWindowTitleOverlay(this);
             return;
         }
 
@@ -1755,9 +1820,9 @@ border-radius: ${borderWidth}px;
         let cols = this.length;
         if (cols <= 1) {
             this.windowPositionBar.hide();
-            // destroy title labels
-            this.windowTitleLabels.forEach(l => l.destroy());
-            this.windowTitleLabels = [];
+            this._destroyWindowTitleLabels();
+            if (this.hasTopBar)
+                Topbar.syncWindowTitleOverlay(this);
             return;
         } else {
             this.windowPositionBar.show();
@@ -1773,53 +1838,29 @@ border-radius: ${borderWidth}px;
         let windex = this.indexOf(this.selectedWindow);
         this.windowPositionBar.x = windex * segments;
 
-        // update window title labels for each column
-        // remove excess labels
+        if (this.hasTopBar) {
+            this._destroyWindowTitleLabels();
+            Topbar.syncWindowTitleOverlay(this);
+            return;
+        }
+
         while (this.windowTitleLabels.length > cols) {
-            let label = this.windowTitleLabels.pop();
-            label.destroy();
+            const segment = this.windowTitleLabels.pop();
+            this._destroyWindowTitleLabel(segment);
         }
 
         for (let i = 0; i < cols; i++) {
-            let column = this[i];
-            let title = "";
-            if (column && column.length > 0) {
-                let mw = column[0];
-                let t = mw.get_title();
-                if (t) title = t;
-            }
-
-            let label;
-            if (i < this.windowTitleLabels.length) {
-                label = this.windowTitleLabels[i];
-            } else {
-                label = new St.Label();
-                label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-                label.y_align = Clutter.ActorAlign.CENTER;
-                this.windowPositionBarBackdrop.add_child(label);
-                this.windowTitleLabels.push(label);
-            }
-
-            label.text = title;
-            let segWidth = Math.max(segments - 8, 30);
-            label.style = "width: " + segWidth + "px; font-size: 13px; text-align: center;"
-                + (i === windex
-                    ? " color: white;"
-                    : " color: rgba(255,255,255,0.7);");
-            let panelH = Topbar.panelBox.height;
-            label.height = panelH;
-            let estTextH = 16;
-            label.y = Math.round((panelH - estTextH) / 2);
-            label.x = i * segments + 4;
-            label.reactive = true;
-            let colIndex = i;
-            label._clickHandler = label.connect("button-press-event", () => {
-                let col = this[colIndex];
-                if (col && col.length > 0) {
-                    this.activateWithFocus(col[0], false, false);
-                }
-                return Clutter.EVENT_STOP;
-            });
+            const segment = this.windowTitleLabels[i] ?? this._createWindowTitleLabel();
+            const width = Math.max(0, segments - 8);
+            segment.columnIndex = i;
+            segment.actor.set_position(Math.round(i * segments + 4), 0);
+            segment.actor.set_size(Math.floor(width), Topbar.panelBox.height);
+            segment.actor.visible = width > 0;
+            this._setWindowTitleLabelWindow(segment, this[i]?.[0] ?? null);
+            if (i === windex)
+                segment.label.add_style_pseudo_class('selected');
+            else
+                segment.label.remove_style_pseudo_class('selected');
         }
     }
 
@@ -2200,6 +2241,9 @@ border-radius: ${borderWidth}px;
         this.getWindows().forEach(w => {
             removePaperWMFlags(w);
         });
+        this._destroyWindowTitleLabels();
+        if (Topbar.panelSpace() === this)
+            Topbar.clearWindowTitleOverlay();
         this.signals.destroy();
         this.signals = null;
         this.background.destroy();

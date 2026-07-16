@@ -637,6 +637,11 @@
       <summary>Handle maximize events from windows (e.g. header bar double click) by maximizing their width without going beyond the margins.</summary>
     </key>
 
+    <key type="b" name="prevent-tiled-window-minimize">
+      <default>true</default>
+      <summary>Prevent tiled windows from being minimized while still allowing floating and scratch windows to minimize.</summary>
+    </key>
+
     <key type="as" name="workspace-colors">
       <default><![CDATA[['#314E6C', '#565248', '#445632', '#663822',
        '#494066', '#826647', '#4B6983', '#807D74', '#5D7555', '#884631',

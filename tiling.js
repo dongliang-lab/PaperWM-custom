@@ -1855,13 +1855,10 @@ border-radius: ${borderWidth}px;
             columnIndex: this.windowTitleLabels.length,
             metaWindow: null,
         };
-        actor.connect('button-press-event', () => {
-            const column = this[segment.columnIndex];
-            if (!column?.[0])
-                return Clutter.EVENT_PROPAGATE;
-
-            this.activateWithFocus(column[0], false, false);
-            return Clutter.EVENT_STOP;
+        actor.connect('button-press-event', (_actor, event) => {
+            return this.handleWindowTitleButton(segment.columnIndex, event.get_button())
+                ? Clutter.EVENT_STOP
+                : Clutter.EVENT_PROPAGATE;
         });
         this.windowPositionBarBackdrop.add_child(actor);
         this.windowTitleLabels.push(segment);
@@ -1888,6 +1885,24 @@ border-radius: ${borderWidth}px;
     _destroyWindowTitleLabels() {
         this.windowTitleLabels.forEach(segment => this._destroyWindowTitleLabel(segment));
         this.windowTitleLabels = [];
+    }
+
+    handleWindowTitleButton(columnIndex, button) {
+        const metaWindow = this[columnIndex]?.[0];
+        if (!metaWindow)
+            return false;
+
+        if (button === Clutter.BUTTON_PRIMARY) {
+            this.activateWithFocus(metaWindow, false, false);
+            return true;
+        }
+
+        if (button === Clutter.BUTTON_MIDDLE) {
+            metaWindow.delete(global.get_current_time());
+            return true;
+        }
+
+        return false;
     }
 
     updateWindowPositionBar() {
@@ -4941,6 +4956,22 @@ export function focus_handler(metaWindow) {
 export function minimizeHandler(metaWindow) {
     if (metaWindow.minimized) {
         console.debug('minimized', metaWindow?.title);
+        if (Settings.prefs.prevent_tiled_window_minimize && isTiled(metaWindow)) {
+            const space = spaces.spaceOfWindow(metaWindow);
+            const restoreFocus = space?.selectedWindow === metaWindow;
+            metaWindow.unminimize();
+
+            if (restoreFocus) {
+                Utils.later_add(Meta.LaterType.IDLE, () => {
+                    if (space.selectedWindow === metaWindow &&
+                        !metaWindow.minimized &&
+                        metaWindow.get_compositor_private())
+                        space.activateWithFocus(metaWindow, false, false);
+                });
+            }
+            return;
+        }
+
         // check if was tiled
         if (isTiled(metaWindow)) {
             metaWindow._tiled_on_minimize = true;

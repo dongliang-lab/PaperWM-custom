@@ -148,8 +148,11 @@ export function enable (extension) {
     });
 
     signals.connect(global.stage, 'captured-event', (_actor, event) => {
-        if (event.type() !== Clutter.EventType.BUTTON_PRESS ||
-            event.get_button() !== Clutter.BUTTON_PRIMARY)
+        if (event.type() !== Clutter.EventType.BUTTON_PRESS)
+            return Clutter.EVENT_PROPAGATE;
+
+        const button = event.get_button();
+        if (button !== Clutter.BUTTON_PRIMARY && button !== Clutter.BUTTON_MIDDLE)
             return Clutter.EVENT_PROPAGATE;
 
         const space = windowTitleSpace;
@@ -167,11 +170,10 @@ export function enable (extension) {
             return Clutter.EVENT_PROPAGATE;
 
         const segmentWidth = monitor.width / space.length;
-        const column = space[Math.floor(x / segmentWidth)];
-        if (!column?.[0])
+        const columnIndex = Math.floor(x / segmentWidth);
+        if (!space.handleWindowTitleButton(columnIndex, button))
             return Clutter.EVENT_PROPAGATE;
 
-        space.activateWithFocus(column[0], false, false);
         return Clutter.EVENT_STOP;
     });
 
